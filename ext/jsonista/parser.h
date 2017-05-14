@@ -1,13 +1,15 @@
 #ifndef JSONISTA_PARSER_H
 #define JSONISTA_PARSER_H
-typedef struct stack parser_state_stack_t;
-typedef struct parser_buffer buffer_t;
+typedef struct stack_st parser_state_stack_t;
+typedef struct parser_buffer_st buffer_t;
 typedef struct {
     parser_state_stack_t *stack;
     buffer_t *buffer;
     const char *p;
+    char tmp[16];
     void(*emit_number)(const char *p, const char *e);
 } parser_t;
+
 
 parser_t *parser_new();
 void parser_init(parser_t *parser);

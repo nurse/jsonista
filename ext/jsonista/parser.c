@@ -20,7 +20,7 @@ enum parser_state {
     STATE_BUG,
 };
 
-typedef struct stack {
+typedef struct stack_st {
     enum parser_state *head;
     enum parser_state *current;
     enum parser_state *end;
@@ -87,7 +87,7 @@ stack_clear(parser_state_stack_t *p) {
 }
 
 /* buffer */
-typedef struct parser_buffer {
+typedef struct parser_buffer_st {
     char *buf;
     char *p;
     char *e;
@@ -111,6 +111,11 @@ buffer_free(buffer_t *buf) {
     free(buf);
 }
 
+static void
+buffer_clear(buffer_t *buf) {
+    buf->p = buf->buf;
+}
+
 static size_t
 buffer_memsize(buffer_t *buf) {
     return sizeof(buffer_t) + buf->e - buf->buf;
@@ -132,6 +137,33 @@ buffer_write(buffer_t *buf, const char *p, size_t len) {
     buf->p += len;
 }
 
+static void
+buffer_write_char(buffer_t *buf, int c) {
+    if (c <= 0x7F) {
+	buffer_ensure_writable(buf, 1);
+	buf->p[0] = c;
+	buf->p++;
+    } else if (c <= 0x7FF) {
+	buffer_ensure_writable(buf, 2);
+	buf->p[0] = 0xC0 | ((c >>  6) & 0x1F);
+	buf->p[1] = 0x80 | ((c      ) & 0x3F);
+	buf->p += 2;
+    } else if (c <= 0xFFFF) {
+	buffer_ensure_writable(buf, 3);
+	buf->p[0] = 0xE0 | ((c >> 12) & 0x0F);
+	buf->p[1] = 0x80 | ((c >>  6) & 0x3F);
+	buf->p[2] = 0x80 | ( c        & 0x3F);
+	buf->p += 3;
+    } else if (c <= 0x10FFFF) {
+	buffer_ensure_writable(buf, 4);
+	buf->p[0] = 0xF0 | ((c >> 18) & 0x0F);
+	buf->p[1] = 0x80 | ((c >> 12) & 0x3F);
+	buf->p[2] = 0x80 | ((c >>  6) & 0x3F);
+	buf->p[3] = 0x80 | ( c        & 0x3F);
+	buf->p += 4;
+    }
+}
+
 /* parser */
 parser_t *
 parser_new() {
@@ -146,6 +178,11 @@ parser_init(parser_t *parser) {
 	stack_clear(parser->stack);
     } else {
 	parser->stack = stack_new();
+    }
+    if (parser->buffer) {
+	buffer_clear(parser->buffer);
+    } else {
+	parser->buffer = buffer_new();
     }
     parser->p = NULL;
 }
@@ -182,6 +219,23 @@ parser_state_set(parser_t *parser, enum parser_state state) {
 }
 
 static void
+parser_buffer_write_char(parser_t *parser, int c) {
+    buffer_write_char(parser->buffer, c);
+}
+
+static void
+parser_buffer_write(parser_t *parser, const char *p, size_t len) {
+    buffer_write(parser->buffer, p, len);
+}
+
+static void
+parser_tmp_replace(parser_t *parser, const char *p, const char *e) {
+    size_t len = e - p;
+    memcpy(parser->tmp, p, len);
+    parser->tmp[len] = 0;
+}
+
+static void
 skip_ws(const char **pp, const char *e) {
     const char *p = *pp;
     while (p < e) {
@@ -200,43 +254,15 @@ skip_ws(const char **pp, const char *e) {
     *pp = p;
 }
 
-static enum parse_error
-parse_string0(const char **pp, const char *e) {
-    const char *p = *pp;
-    while (p < e) {
-	switch (*p) {
-	  case '\\':
-	    p += 2;
-	    continue;
-	  case '"':
-	    *pp = ++p;
-	    return ERR_SUCCESS;
-	}
-	p++;
-	/* TODO: check invalid bytes */
-    }
-    return ERR_NEEDMORE;
-}
-
-static enum parse_error
-parse_string(const char **pp, const char *e) {
-    const char *p = *pp;
-    skip_ws(&p, e);
-    if (p < e) {
-	if (*p == '"') {
-	    *pp = ++p;
-	    return parse_string0(pp, e);
-	}
-	*pp = p;
-	return ERR_INVALID;
-    }
-    *pp = p;
-    return ERR_NEEDMORE;
-}
-
 static int
 js_isdigit(char c) {
     return '0' <= c && c <= '9';
+}
+
+static int
+istrail(char c) {
+    unsigned char u = (unsigned char)c;
+    return 0x80 <= u && u <= 0xBF;
 }
 
 #define POP_STACK() do { state = stack_pop(stack); goto resume; } while (0)
@@ -263,6 +289,201 @@ js_isdigit(char c) {
     parser_state_set(parser, state); \
     parser->p = p; \
 } while (0)
+
+static int
+to_i(char c) {
+    const int x = 0x10000;
+    const int tbl[256] = {
+	 x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,
+	 x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,
+	 x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,
+	 0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  x,  x,  x,  x,  x,  x,
+	 x, 10, 11, 12, 13, 14, 15,  x,  x,  x,  x,  x,  x,  x,  x,  x,
+	 x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,
+	 x, 10, 11, 12, 13, 14, 15,  x,  x,  x,  x,  x,  x,  x,  x,  x,
+	 x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,
+	 x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,
+	 x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,
+	 x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,
+	 x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,
+	 x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,
+	 x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,
+	 x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,
+	 x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,
+    };
+    return tbl[c];
+}
+
+/* convert 4 digits to integer */
+static int
+digits2i(const char *p) {
+    int c = (to_i(p[0]) << 12) | (to_i(p[1]) << 8) | (to_i(p[2]) << 4) | to_i(p[3]);
+    if (c > 0xFFFF) {
+	if (c & 0x10000) return -1;
+	if (c & 0x100000) return -2;
+	if (c & 0x1000000) return -3;
+	if (c & 0x10000000) return -4;
+    }
+    return c;
+}
+
+static enum parse_error
+parse_escape(parser_t *parser, const char **pp, const char *e) {
+    const char *p = *pp;
+    int c;
+    //fprintf(stderr, "%d: ESCAPE: \"%s\"\n",__LINE__,p);
+    switch (*p++) {
+      case '"':  parser_buffer_write_char(parser, '"');  break;
+      case '\\': parser_buffer_write_char(parser, '\\'); break;
+      case '/':  parser_buffer_write_char(parser, '/');  break;
+      case 'b':  parser_buffer_write_char(parser, '\b'); break;
+      case 'f':  parser_buffer_write_char(parser, '\f'); break;
+      case 'n':  parser_buffer_write_char(parser, '\n'); break;
+      case 'r':  parser_buffer_write_char(parser, '\r'); break;
+      case 't':  parser_buffer_write_char(parser, '\t'); break;
+      case 'u':
+	ENSURE_READABLE(4);
+	c = digits2i(p);
+	if (c < 0) {
+	    p -= c;
+	    goto invalid;
+	} else if (0xD800 <= c && c <= 0xDBFF) {
+	    int d;
+	    ENSURE_READABLE(6);
+	    if (p[4] != '\\') { p += 4; goto invalid; }
+	    if (p[5] != 'u') { p += 5; goto invalid; }
+	    d = digits2i(p+6);
+	    if (d < 0) {
+		p += 6 - d;
+		goto invalid;
+	    }
+	    c &= 0x3FF;
+	    c <<= 10;
+	    c += 0x10000;
+	    c |= d &0x3FF;
+	    parser_buffer_write_char(parser, c);
+	    p += 10;
+    fprintf(stderr, "%d: ESCAPE: \"%s\" %x\n",__LINE__,p, c);
+	} else if (0xDC00 <= c && c <= 0xDFFF) {
+	    goto invalid;
+	} else {
+	    parser_buffer_write_char(parser, c);
+	    p += 4;
+	}
+	break;
+      default:
+	p--;
+	goto invalid;
+    }
+    *pp = p;
+    return ERR_SUCCESS;
+needmore:
+    parser_tmp_replace(parser, *pp, e);
+    return ERR_NEEDMORE;
+invalid:
+    *pp = p;
+    return ERR_INVALID;
+}
+
+static enum parse_error
+parse_string0(parser_t *parser, const char **pp, const char *e) {
+    const char *p = *pp;
+    while (p < e) {
+	if (*p == '"') {
+	    goto success;
+	} else if (*p == '\\') {
+	    int err;
+	    if (++p >= e) goto needmore;
+	    err = parse_escape(parser, &p, e);
+	    switch (err) {
+	      case ERR_INVALID:
+		goto invalid;
+	      case ERR_NEEDMORE:
+		goto invalid;
+	      case ERR_SUCCESS:
+		break;
+	    }
+	} else if (*p < 0x20) {
+	    goto invalid;
+	} else if (*p <= 0x7F) {
+	    parser_buffer_write_char(parser, *p);
+	    p++;
+	} else if ((uint8_t)*p < 0xC2) {
+	    goto invalid;
+	} else if ((uint8_t)*p < 0xE0) {
+	    ENSURE_READABLE(2);
+	    if (!istrail(p[1])) { p += 1; goto invalid; }
+	    parser_buffer_write(parser, p, 2);
+	} else if ((uint8_t)*p == 0xE0) {
+	    ENSURE_READABLE(3);
+	    if (0xA0 <= (uint8_t)p[1] && (uint8_t)p[1] <= 0xBF) {
+		p += 1;
+		goto invalid;
+	    }
+	    if (!istrail(p[2])) { p += 2; goto invalid; }
+	    parser_buffer_write(parser, p, 3);
+	} else if ((uint8_t)*p < 0xF0) {
+	    ENSURE_READABLE(3);
+	    if (!istrail(p[1])) { p += 1; goto invalid; }
+	    if (!istrail(p[2])) { p += 2; goto invalid; }
+	    parser_buffer_write(parser, p, 3);
+	} else if ((uint8_t)*p == 0xF0) {
+	    ENSURE_READABLE(4);
+	    if (0x90 <= (uint8_t)p[1] && (uint8_t)p[1] <= 0xBF) {
+		p += 1;
+		goto invalid;
+	    }
+	    if (!istrail(p[2])) { p += 2; goto invalid; }
+	    if (!istrail(p[3])) { p += 3; goto invalid; }
+	    parser_buffer_write(parser, p, 4);
+	} else if ((uint8_t)*p < 0xF4) {
+	    ENSURE_READABLE(4);
+	    if (!istrail(p[1])) { p += 1; goto invalid; }
+	    if (!istrail(p[2])) { p += 2; goto invalid; }
+	    if (!istrail(p[3])) { p += 3; goto invalid; }
+	    parser_buffer_write(parser, p, 4);
+	} else if ((uint8_t)*p == 0xF4) {
+	    ENSURE_READABLE(4);
+	    if (0x80 <= (uint8_t)p[1] && (uint8_t)p[1] <= 0x8F) {
+		p += 1;
+		goto invalid;
+	    }
+	    if (!istrail(p[2])) { p += 2; goto invalid; }
+	    if (!istrail(p[3])) { p += 3; goto invalid; }
+	    parser_buffer_write(parser, p, 4);
+	} else {
+	    goto invalid;
+	}
+    }
+needmore:
+    fprintf(stderr, "%d: STRING:NEEDMORE \"%s\"\n",__LINE__,p);
+    return ERR_NEEDMORE;
+invalid:
+    *pp = p;
+    fprintf(stderr, "%d: STRING:INVALID \"%s\"\n",__LINE__,p);
+    return ERR_INVALID;
+success:
+    parser_buffer_write_char(parser, 0);
+    fprintf(stderr, "%d: STRING: \"%s\"\n",__LINE__,parser->buffer->buf);
+    *pp = p;
+    return ERR_SUCCESS;
+}
+
+static enum parse_error
+parse_string(parser_t *parser, const char **pp, const char *e) {
+    const char *p = *pp;
+    skip_ws(&p, e);
+    if (p < e) {
+	if (*p == '"') {
+	    *pp = ++p;
+	    return parse_string0(parser, pp, e);
+	}
+	*pp = p;
+	return ERR_INVALID;
+    }
+    *pp = p;
+    return ERR_NEEDMORE;
+}
 
 enum parse_error
 parser_parse_chunk(parser_t *parser, const char **pp, const char *e) {
@@ -312,7 +533,7 @@ value:
       case '[':
 	goto array_first_value;
       case '"':
-	if (parse_string0(&p, e)) {
+	if (parse_string0(parser, &p, e)) {
 	    // error
 	}
 	break;
@@ -396,7 +617,7 @@ object_first_name:
 object_name:
     SET_STATE(parser, STATE_OBJECT_NAME);
     {
-	enum parse_error ret = parse_string(&p, e);
+	enum parse_error ret = parse_string(parser, &p, e);
 	if (ret) RAISE(ret);
     }
 
@@ -472,114 +693,3 @@ needmore:
 invalid:
     return ERR_INVALID;
 }
-
-static void
-assert_invalid(enum parse_error err, const char *p, char c) {
-    if (err != ERR_INVALID) {
-	fprintf(stderr, "%d: ERR_INVALID is expected but %d\n", __LINE__, err);
-	abort();
-    }
-    if (*p == ':') {
-	fprintf(stderr, "%d: error pos is '%s'\n", __LINE__, p);
-	abort();
-    }
-}
-
-static void
-assert_success(enum parse_error err) {
-    if (err != ERR_SUCCESS) {
-	fprintf(stderr, "%d: ERR_SUCCESS is expected but %d\n", __LINE__, err);
-	abort();
-    }
-}
-
-static void
-assert_needmore(enum parse_error err) {
-    if (err != ERR_NEEDMORE) {
-	fprintf(stderr, "%d: ERR_NEEDMORE is expected but %d\n", __LINE__, err);
-	abort();
-    }
-}
-
-/*
-int
-main(void) {
-    const char *p;
-    const char *e;
-    parser_t *parser = parser_new();
-    enum parse_error err;
-
-    p = " {  \"foo\" : {},\"bar\":-2.0e+1,\"baz\":[[], 1]}";
-    e = p + strlen(p);
-    parse_value(parser, &p, e);
-    if (p != e) {
-	fprintf(stderr, "%s\n", p);
-	abort();
-    }
-
-    parser_init(parser);
-    p = " {  \"foo\" : { },\"bar\":-2.0e+1,\"baz\":[[  ], 1]} ";
-    e = p + strlen(p);
-    parse_value(parser, &p, e);
-    if (p != e) {
-	fprintf(stderr, "%s\n", p);
-	abort();
-    }
-
-    parser_init(parser);
-    p = " { : ";
-    e = p + strlen(p);
-    err = parse_value(parser, &p, e);
-    assert_invalid(err, parser->p, ':');
-
-    parser_init(parser);
-    p = " {  ";
-    e = p + strlen(p);
-    err = parse_value(parser, &p, e);
-    assert_needmore(err);
-    p = " }  ";
-    e = p + strlen(p);
-    err = parse_value(parser, &p, e);
-    assert_success(err);
-
-    parser_init(parser);
-    p = " [  ";
-    e = p + strlen(p);
-    err = parse_value(parser, &p, e);
-    assert_needmore(err);
-    p = " ]  ";
-    e = p + strlen(p);
-    err = parse_value(parser, &p, e);
-    assert_success(err);
-
-    parser_init(parser);
-    p = " [ 1 ]  ";
-    e = p + strlen(p);
-    err = parse_value(parser, &p, e);
-    assert_success(err);
-
-    parser_init(parser);
-    p = " [ true, false, null ]  ";
-    e = p + strlen(p);
-    err = parse_value(parser, &p, e);
-    assert_success(err);
-
-    parser_init(parser);
-    p = " [ tru ]  ";
-    e = p + strlen(p);
-    err = parse_value(parser, &p, e);
-    assert_invalid(err, parser->p, ' ');
-
-    parser_init(parser);
-    p = " [  1";
-    e = p + strlen(p);
-    err = parse_value(parser, &p, e);
-    assert_needmore(err);
-    p = "1 ]  ";
-    e = p + strlen(p);
-    err = parse_value(parser, &p, e);
-    assert_success(err);
-
-    return 0;
-}
-*/

@@ -80,6 +80,23 @@ jsonista_parser_initialize(VALUE self)
 }
 
 static void parse_error_src_pos(VALUE src, ptrdiff_t pos);
+/*
+ * @overload parser_chunk(str)
+ *   @param str [String] full or partial JSON string
+ *
+ * returns nil
+ */
+static VALUE
+jsonista_parser_reset(VALUE self)
+{
+    parser_t *tobj;
+    TypedData_Get_Struct(self, parser_t, &jsonista_parser_data_type, tobj);
+    parser_init(tobj);
+    return Qnil;
+}
+
+struct {
+} ruby_json_parser_t;
 
 /*
  * @overload parser_chunk(str)
@@ -90,15 +107,15 @@ static void parse_error_src_pos(VALUE src, ptrdiff_t pos);
 static VALUE
 jsonista_parser_parse_chunk(VALUE self, VALUE str)
 {
-    parser_t *tobj;
+    parser_t *parser;
     const char *s, *p, *e;
     enum parse_error err;
 
-    TypedData_Get_Struct(self, parser_t, &jsonista_parser_data_type, tobj);
+    TypedData_Get_Struct(self, parser_t, &jsonista_parser_data_type, parser);
     StringValue(str);
     s = p = RSTRING_PTR(str);
     e = RSTRING_END(str);
-    err = parser_parse_chunk(tobj, &p, e);
+    err = parser_parse_chunk(parser, &p, e);
     switch (err) {
       case ERR_INVALID:
 	parse_error_src_pos(str, p - s);
@@ -175,6 +192,7 @@ Init_jsonista(void)
     cParser = rb_define_class_under(mJsonista, "Parser", rb_cObject);
     rb_define_alloc_func(cParser, jsonista_parser_s_alloc);
     rb_define_method(cParser, "initialize", jsonista_parser_initialize, 0);
+    rb_define_method(cParser, "reset", jsonista_parser_reset, 0);
     rb_define_method(cParser, "parse_chunk", jsonista_parser_parse_chunk, 1);
 
     eParseError = rb_define_class_under(mJsonista, "ParseError", rb_eStandardError);
